@@ -1071,7 +1071,9 @@ void Menu::ProcessInputEventQueue()
 			                                (key == VK_RETURN || key == VK_ESCAPE);
 
 			// Dispatch bound hotkey actions for `key`. Combo bindings (modifier + key)
-			// fire on key-down for responsiveness; single-key bindings fire on key-up.
+			// and Skip Compilation fire on key-down for responsiveness and to avoid
+			// relying on key-up events that DirectInput can lose under Wine.
+			// Other single-key bindings fire on key-up.
 			auto dispatchHotkeyActions = [this, key](bool combosOnly) {
 				struct KeyAction
 				{
@@ -1087,7 +1089,11 @@ void Menu::ProcessInputEventQueue()
 								 ImGui::GetIO().ClearInputKeys();  // Prevent toggle key from remaining "held" in ImGui after open.
 						 }
 					 } },
-					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && shaderCache->IsCompiling()) shaderCache->backgroundCompilation = true; } },
+					{ settings.SkipCompilationKey, [this, shaderCache]() {
+			 		if (!ShouldSwallowInput() && shaderCache->IsCompiling()) {
+		 			shaderCache->backgroundCompilation.store(true, std::memory_order_release);
+	 					}
+ 					} },
 					{ settings.EffectToggleKey, [shaderCache]() { shaderCache->SetEnabled(!shaderCache->IsEnabled()); } },
 					{ settings.ShaderBlockPrevKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(); } },
 					{ settings.ShaderBlockNextKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(false); } },
@@ -1120,7 +1126,8 @@ void Menu::ProcessInputEventQueue()
 					return true;
 				for (const auto& ka : keyActions) {
 					const bool isCombo = ka.settingKey.size() > 1;
-					if (isCombo == combosOnly && InputCombo::MatchesKeyboardCombo(ka.settingKey, key)) {
+					const bool fireOnKeyDown = isCombo || &ka.settingKey == &settings.SkipCompilationKey;
+					if (fireOnKeyDown == combosOnly && InputCombo::MatchesKeyboardCombo(ka.settingKey, key)) {
 						ka.action();
 						return true;
 					}
