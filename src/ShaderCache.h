@@ -3,6 +3,7 @@
 #include <BS_thread_pool.hpp>
 #include <efsw/efsw.hpp>
 #include <vector>
+#include <atomic>
 
 #include "Utils/WinApi.h"
 
@@ -522,7 +523,7 @@ namespace SIE
 		int32_t backgroundCompilationThreadCount = std::max(static_cast<int32_t>(Util::GetPerformanceCoreCount()) / 2, 1);
 		BS::thread_pool<> compilationPool{ static_cast<std::size_t>(compilationThreadCount) };
 		std::jthread managementJthread;  // dedicated thread for ManageCompilationSet (not in pool)
-		bool backgroundCompilation = false;
+		std::atomic_bool backgroundCompilation{ false };
 		bool menuLoaded = false;
 
 		enum class LightingShaderTechniques
