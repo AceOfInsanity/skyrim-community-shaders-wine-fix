@@ -1362,19 +1362,32 @@ namespace SIE
 			auto diskPath = GetDiskPath(shader.fxpFilename, descriptor, shaderClass);
 			ID3DBlob* shaderBlob = nullptr;
 
-			if (useDiskCache && std::filesystem::exists(diskPath)) {
+			// Wine can expose unrelated/stale Win32 last-error values while probing
+			// virtualized paths. Treat a failed probe as a cache miss instead of
+			// allowing the throwing overload to abort the shader task.
+			std::error_code diskCacheProbeError;
+			const bool diskCacheExists =
+				useDiskCache && std::filesystem::exists(diskPath, diskCacheProbeError);
+			if (diskCacheExists) {
 				// Determine whether the disk-cached shader is still valid.
 				bool diskCacheOutdated = false;
 				if (cache.UseFileWatcher()) {
 					// File watcher tracks runtime changes in memory: compare disk-cache mtime against tracked source mtime.
-					auto diskCacheTime = std::chrono::clock_cast<std::chrono::system_clock>(std::filesystem::last_write_time(diskPath));
-					diskCacheOutdated = cache.ShaderModifiedSince(shader.fxpFilename, diskCacheTime);
-					if (diskCacheOutdated)
-						logger::debug("Diskcached shader {} older than {}", SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true), std::format("{:%Y%m%d%H%M}", diskCacheTime));
+					std::error_code ec;
+					auto diskCacheFileTime = std::filesystem::last_write_time(diskPath, ec);
+					if (ec) {
+						logger::debug("Failed to read disk cache mtime for {}: {}", Util::WStringToString(diskPath), ec.message());
+					} else {
+						auto diskCacheTime = std::chrono::clock_cast<std::chrono::system_clock>(diskCacheFileTime);
+						diskCacheOutdated = cache.ShaderModifiedSince(shader.fxpFilename, diskCacheTime);
+						if (diskCacheOutdated)
+							logger::debug("Diskcached shader {} older than {}", SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true), std::format("{:%Y%m%d%H%M}", diskCacheTime));
+					}
 				} else if (cache.IsSkipUnchangedShaders()) {
 					// No file watcher: compare disk-cache mtime directly against the .hlsl source file mtime.
+					// Compare file_time_type directly (no clock_cast) to avoid Wine stale last-error issues.
 					std::error_code ec;
-					const auto diskCacheTime = std::chrono::clock_cast<std::chrono::system_clock>(std::filesystem::last_write_time(diskPath, ec));
+					const auto diskCacheTime = std::filesystem::last_write_time(diskPath, ec);
 					if (ec) {
 						logger::debug("Failed to read disk cache mtime for {}: {}", Util::WStringToString(diskPath), ec.message());
 					} else {
@@ -1382,14 +1395,12 @@ namespace SIE
 							shader.shaderType == RE::BSShader::Type::ImageSpace ?
 								static_cast<const RE::BSImagespaceShader&>(shader).originalShaderName :
 								shader.fxpFilename);
-						if (std::filesystem::exists(shaderSourcePath)) {
-							const auto sourceTime = std::chrono::clock_cast<std::chrono::system_clock>(std::filesystem::last_write_time(shaderSourcePath, ec));
-							if (ec) {
-								logger::debug("Failed to read source mtime for {}: {}", Util::WStringToString(shaderSourcePath), ec.message());
-							} else if (sourceTime > diskCacheTime) {
-								diskCacheOutdated = true;
-								logger::debug("Disk-cached shader {} outdated: source is newer than cache", SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true));
-							}
+						const auto sourceTime = std::filesystem::last_write_time(shaderSourcePath, ec);
+						if (ec) {
+							logger::debug("Failed to read source mtime for {}: {}", Util::WStringToString(shaderSourcePath), ec.message());
+						} else if (sourceTime > diskCacheTime) {
+							diskCacheOutdated = true;
+							logger::debug("Disk-cached shader {} outdated: source is newer than cache", SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true));
 						}
 					}
 				}
@@ -3150,11 +3161,12 @@ namespace SIE
 		if (!conditionVariable.wait(
 				lock, stoken,
 				[this, &shaderCache]() { return !availableTasks.empty() &&
-			                                    // Dispatch when pool has room. Use < (not <=) so that after
-			                                    // push_task() the total never exceeds the limit.
-			                                    (int)shaderCache->compilationPool.get_tasks_total() <
-			                                        (!shaderCache->backgroundCompilation ? shaderCache->compilationThreadCount : shaderCache->backgroundCompilationThreadCount); })) {
-			/*Woke up because of a stop request. */
+		// Complete() removes the task from this set before notifying.
+		// The pool still counts the notifying task as running until
+		// its callback returns, which can otherwise lose the wake-up.
+		static_cast<int>(tasksInProgress.size()) <
+    		(!shaderCache->backgroundCompilation.load() ? shaderCache->compilationThreadCount : shaderCache->backgroundCompilationThreadCount); })) {
+		//*Woke up because of a stop request. */
 			return std::nullopt;
 		}
 		// Session clock is now managed by CompilationSet::Add(); this branch is kept
